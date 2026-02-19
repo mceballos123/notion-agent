@@ -1,10 +1,38 @@
-"""Thin wrapper around the Notion SDK — uses search API, no database ID required."""
+"""Thin wrapper around the Notion SDK — uses embedding-based semantic search."""
 
 import logging
-from notion_client import Client
 import os
 
+from notion_client import Client
+from openai import OpenAI
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------------
+_embedding_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def _get_embedding(text: str) -> list[float]:
+    """Return the embedding vector for a text string."""
+    r = _embedding_client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+        encoding_format="float",
+    )
+    return r.data[0].embedding
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors (no numpy needed)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
 
 class NotionNotes:
     """Searches and reads pages across the entire Notion workspace the integration can access."""
@@ -14,6 +42,8 @@ class NotionNotes:
         if not api_key:
             raise ValueError("NOTION_API_KEY must be set in .env")
         self.client = Client(auth=api_key)
+        # In-memory embedding cache: page_id -> (title, embedding)
+        self._cache: dict[str, tuple[str, list[float]]] = {}
 
     def test_connection(self) -> bool:
         """Verify the Notion API key works by running a simple search."""
@@ -23,26 +53,61 @@ class NotionNotes:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Semantic search
+    # ------------------------------------------------------------------
+
     def search_notes(self, query: str = "", limit: int = 10) -> list[dict]:
-        """Search pages by keyword across the whole workspace."""
-        result = self.client.search(
-            query=query,
-            filter={"value": "page", "property": "object"},
-            sort={"direction": "descending", "timestamp": "last_edited_time"},
-            page_size=limit,
+        """Search pages semantically using embeddings.
+
+        If query is empty, falls back to listing recent pages (no embedding needed).
+        """
+        # Fetch all accessible pages from Notion
+        all_pages = self._fetch_all_pages()
+
+        if not all_pages:
+            logger.info("No pages accessible in workspace")
+            return []
+
+        # No query → just return the most recent pages
+        if not query.strip():
+            return all_pages[:limit]
+
+        # Embed the query
+        query_embedding = _get_embedding(query)
+
+        # Embed each page title (uses cache to avoid re-embedding)
+        scored = []
+        for page in all_pages:
+            page_id = page["id"]
+            title = page["title"]
+
+            if page_id in self._cache and self._cache[page_id][0] == title:
+                title_embedding = self._cache[page_id][1]
+            else:
+                title_embedding = _get_embedding(title)
+                self._cache[page_id] = (title, title_embedding)
+
+            score = _cosine_similarity(query_embedding, title_embedding)
+            scored.append((score, page))
+
+        # Sort by similarity (highest first) and return top results
+        scored.sort(key=lambda x: x[0], reverse=True)
+        results = [page for score, page in scored[:limit] if score > 0.3]
+
+        logger.info(
+            f"Semantic search query='{query}' matched {len(results)} of {len(all_pages)} pages "
+            f"(top score={scored[0][0]:.3f})"
         )
-        logger.info(f"Notion search query='{query}' returned {len(result.get('results', []))} results")
-        if not result.get("results"):
-            # Try without filter to see if there's anything at all
-            raw = self.client.search(query="", page_size=5)
-            logger.info(f"Unfiltered search returned {len(raw.get('results', []))} results")
-            for r in raw.get("results", [])[:3]:
-                logger.info(f"  -> object={r.get('object')}, id={r.get('id')}")
-        return self._extract_pages(result)
+        return results
 
     def list_recent_notes(self, limit: int = 10) -> list[dict]:
         """Return the most recently edited pages."""
         return self.search_notes(query="", limit=limit)
+
+    # ------------------------------------------------------------------
+    # Page operations
+    # ------------------------------------------------------------------
 
     def get_page_content(self, page_id: str) -> str:
         """Retrieve the text content (blocks) of a single page."""
@@ -58,7 +123,7 @@ class NotionNotes:
         return "\n".join(texts)
 
     def create_page(self, title: str, content: str = "") -> dict:
-        """Create a new page in the workspace (as a top-level page)."""
+        """Create a new page in the workspace (as a child of first accessible page)."""
         children = []
         if content:
             children.append({
@@ -75,6 +140,8 @@ class NotionNotes:
             },
             children=children,
         )
+        # Invalidate cache so new page shows up in searches
+        self._cache.pop(page["id"], None)
         return {"id": page["id"], "title": title, "url": page.get("url", "")}
 
     def append_to_page(self, page_id: str, text: str) -> bool:
@@ -109,7 +176,22 @@ class NotionNotes:
     def archive_page(self, page_id: str) -> bool:
         """Archive (soft-delete) a page."""
         self.client.pages.update(page_id=page_id, archived=True)
+        self._cache.pop(page_id, None)
         return True
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _fetch_all_pages(self) -> list[dict]:
+        """Fetch all accessible pages from Notion (up to 100)."""
+        result = self.client.search(
+            query="",
+            filter={"value": "page", "property": "object"},
+            sort={"direction": "descending", "timestamp": "last_edited_time"},
+            page_size=100,
+        )
+        return self._extract_pages(result)
 
     def _get_root_page_id(self) -> str:
         """Get the first accessible page to use as a parent for new pages."""
@@ -130,7 +212,6 @@ class NotionNotes:
         for page in search_result.get("results", []):
             props = page.get("properties", {})
 
-            # Find the title — could be under any property name
             title = "(untitled)"
             for prop in props.values():
                 if prop.get("type") == "title":
