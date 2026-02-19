@@ -11,12 +11,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Embedding helpers
 # ---------------------------------------------------------------------------
-_embedding_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_embedding_client: OpenAI | None = None
+
+
+def _get_openai_client() -> OpenAI:
+    """Lazily initialise the OpenAI client (after .env is loaded)."""
+    global _embedding_client
+    if _embedding_client is None:
+        _embedding_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _embedding_client
 
 
 def _get_embedding(text: str) -> list[float]:
     """Return the embedding vector for a text string."""
-    r = _embedding_client.embeddings.create(
+    r = _get_openai_client().embeddings.create(
         model="text-embedding-3-small",
         input=text,
         encoding_format="float",
