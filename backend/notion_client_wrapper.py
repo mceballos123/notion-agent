@@ -57,6 +57,72 @@ class NotionNotes:
                     texts.append(plain)
         return "\n".join(texts)
 
+    def create_page(self, title: str, content: str = "") -> dict:
+        """Create a new page in the workspace (as a top-level page)."""
+        children = []
+        if content:
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": content}}]
+                },
+            })
+        page = self.client.pages.create(
+            parent={"page_id": self._get_root_page_id()},
+            properties={
+                "title": [{"type": "text", "text": {"content": title}}]
+            },
+            children=children,
+        )
+        return {"id": page["id"], "title": title, "url": page.get("url", "")}
+
+    def append_to_page(self, page_id: str, text: str) -> bool:
+        """Append a paragraph block to an existing page."""
+        self.client.blocks.children.append(
+            block_id=page_id,
+            children=[{
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": text}}]
+                },
+            }],
+        )
+        return True
+
+    def append_todo(self, page_id: str, text: str, checked: bool = False) -> bool:
+        """Append a to-do checkbox block to an existing page."""
+        self.client.blocks.children.append(
+            block_id=page_id,
+            children=[{
+                "object": "block",
+                "type": "to_do",
+                "to_do": {
+                    "rich_text": [{"type": "text", "text": {"content": text}}],
+                    "checked": checked,
+                },
+            }],
+        )
+        return True
+
+    def archive_page(self, page_id: str) -> bool:
+        """Archive (soft-delete) a page."""
+        self.client.pages.update(page_id=page_id, archived=True)
+        return True
+
+    def _get_root_page_id(self) -> str:
+        """Get the first accessible page to use as a parent for new pages."""
+        result = self.client.search(
+            query="",
+            filter={"value": "page", "property": "object"},
+            page_size=1,
+        )
+        pages = result.get("results", [])
+        if not pages:
+            raise ValueError("No accessible pages found to use as parent.")
+        return pages[0]["id"]
+
     @staticmethod
     def _extract_pages(search_result: dict) -> list[dict]:
         """Flatten Notion page objects into simple dicts."""

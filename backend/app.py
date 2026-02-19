@@ -43,9 +43,7 @@ def _asi1_headers() -> dict:
 # Notion client – initialised lazily after env vars are loaded
 notion: NotionNotes | None = None
 
-# ---------------------------------------------------------------------------
-# Agent setup
-# ---------------------------------------------------------------------------
+
 agent = Agent(
     name=AGENT_NAME,
     seed=SEED_PHRASE,
@@ -56,9 +54,7 @@ agent = Agent(
 
 protocol = Protocol(spec=chat_protocol_spec)
 
-# ---------------------------------------------------------------------------
-# Intent classification prompt
-# ---------------------------------------------------------------------------
+
 SYSTEM_PROMPT = """\
 You are an intent classifier for a Notion notes assistant.
 Given the user message, respond ONLY with valid JSON (no markdown fences).
@@ -68,11 +64,19 @@ Possible intents:
 - search_notes     : user wants to find notes by keyword
 - list_notes       : user wants to see recent/latest notes
 - read_note        : user wants to read the content of a specific note (by title)
+- create_note      : user wants to create a new note/page
+- append_note      : user wants to add text to an existing note
+- add_todo         : user wants to add a to-do/task item to a note
+- archive_note     : user wants to archive/delete a note
 - general_query    : anything else / general question
 
 For search_notes, extract: query (search keyword string), limit (int, default 5).
 For list_notes, extract: limit (int, default 5).
 For read_note, extract: title (the note title to look up).
+For create_note, extract: title (new page title), content (optional body text, default "").
+For append_note, extract: title (existing note title), text (the text to append).
+For add_todo, extract: title (existing note title to add the task to), task (the to-do item text).
+For archive_note, extract: title (the note title to archive).
 
 Response format:
 {"intent": "<intent>", "params": {<extracted params or empty dict>}}
@@ -102,10 +106,6 @@ def classify_intent(user_text: str) -> dict:
     except Exception:
         return {"intent": "general_query", "params": {}}
 
-
-# ---------------------------------------------------------------------------
-# Intent handlers
-# ---------------------------------------------------------------------------
 
 def _ensure_notion() -> str | None:
     """Lazily initialise the Notion client. Returns an error string or None."""
@@ -166,6 +166,63 @@ def handle_read_note(ctx: Context, params: dict) -> str:
     return header + "(This page has no text content.)"
 
 
+def handle_create_note(ctx: Context, params: dict) -> str:
+    err = _ensure_notion()
+    if err:
+        return err
+    title = params.get("title", "Untitled")
+    content = params.get("content", "")
+    try:
+        page = notion.create_page(title=title, content=content)
+        return f"Created note **{title}**\n{page.get('url', '')}"
+    except Exception as e:
+        return f"Failed to create note: {e}"
+
+
+def handle_append_note(ctx: Context, params: dict) -> str:
+    err = _ensure_notion()
+    if err:
+        return err
+    title = params.get("title", "")
+    text = params.get("text", "")
+    if not title or not text:
+        return "I need both a note title and the text to append."
+    notes = notion.search_notes(query=title, limit=1)
+    if not notes:
+        return f"Couldn't find a note titled \"{title}\"."
+    notion.append_to_page(notes[0]["id"], text)
+    return f"Added text to **{notes[0]['title']}**."
+
+
+def handle_add_todo(ctx: Context, params: dict) -> str:
+    err = _ensure_notion()
+    if err:
+        return err
+    title = params.get("title", "")
+    task = params.get("task", "")
+    if not title or not task:
+        return "I need both a note title and the task text."
+    notes = notion.search_notes(query=title, limit=1)
+    if not notes:
+        return f"Couldn't find a note titled \"{title}\"."
+    notion.append_todo(notes[0]["id"], task)
+    return f"Added to-do \"**{task}**\" to **{notes[0]['title']}**."
+
+
+def handle_archive_note(ctx: Context, params: dict) -> str:
+    err = _ensure_notion()
+    if err:
+        return err
+    title = params.get("title", "")
+    if not title:
+        return "I need the title of the note to archive."
+    notes = notion.search_notes(query=title, limit=1)
+    if not notes:
+        return f"Couldn't find a note titled \"{title}\"."
+    notion.archive_page(notes[0]["id"])
+    return f"Archived **{notes[0]['title']}**."
+
+
 def handle_general_query(user_text: str) -> str:
     """Fall back to ASI:1 for general questions."""
     try:
@@ -209,13 +266,13 @@ INTENT_HANDLERS = {
     "search_notes": lambda ctx, p, t: handle_search_notes(ctx, p),
     "list_notes": lambda ctx, p, t: handle_list_notes(ctx, p),
     "read_note": lambda ctx, p, t: handle_read_note(ctx, p),
+    "create_note": lambda ctx, p, t: handle_create_note(ctx, p),
+    "append_note": lambda ctx, p, t: handle_append_note(ctx, p),
+    "add_todo": lambda ctx, p, t: handle_add_todo(ctx, p),
+    "archive_note": lambda ctx, p, t: handle_archive_note(ctx, p),
     "general_query": lambda ctx, p, t: handle_general_query(t),
 }
 
-
-# ---------------------------------------------------------------------------
-# Chat protocol handlers
-# ---------------------------------------------------------------------------
 
 @protocol.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
@@ -265,10 +322,6 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 agent.include(protocol, publish_manifest=True)
 
-# ---------------------------------------------------------------------------
-# Agentverse registration
-# ---------------------------------------------------------------------------
-
 README = """# Notion Notes Agent
 
 ![tag:notion-agent](https://img.shields.io/badge/notion-3D8BD3)
@@ -291,7 +344,6 @@ Send a chat message like:
 - "Read my note titled Project Plan"
 - "What pages do I have about marketing?"
 """
-
 
 @agent.on_event("startup")
 async def startup_handler(ctx: Context):
@@ -324,7 +376,6 @@ async def startup_handler(ctx: Context):
             ctx.logger.error(f"Failed to register with Agentverse: {e}")
     else:
         ctx.logger.warning("AGENTVERSE_KEY or SEED_PHRASE not set, skipping Agentverse registration")
-
 
 if __name__ == "__main__":
     agent.run()
