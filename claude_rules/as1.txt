@@ -1,0 +1,44 @@
+import requests, os
+
+url = "https://api.asi1.ai/v1/chat/completions"
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {os.getenv('ASI_ONE_API_KEY')}"
+}
+data = {
+    "model": "asi1",
+    "messages": [{"role": "user", "content": "What is agentic AI?"}]
+}
+
+print(requests.post(url, headers=headers, json=data).json())
+
+More context for asi:1 mini model
+import requests, os, json
+
+url = "https://api.asi1.ai/v1/chat/completions"
+headers = {
+"Authorization": f"Bearer {os.getenv('ASI_ONE_API_KEY')}",
+"Content-Type": "application/json"
+}
+body = {
+"model": "asi1",
+"messages": [{"role": "user", "content": "Hello! How can you help me today?"}]
+}
+print(requests.post(url, headers=headers, json=body).json()["choices"][0]["message"]["content"])
+
+
+More context for asi:1 mini model
+import requests, os
+
+url = "https://api.asi1.ai/v1/chat/completions"
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {os.getenv('ASI_ONE_API_KEY')}"
+}
+data = {
+    "model": "asi1",
+    "messages": [{"role": "user", "content": "Help me plan a trip to Tokyo"}]
+}
+
+response = requests.post(url, headers=headers, json=data)
+print(response.json()["choices"][0]["message"]["content"])
